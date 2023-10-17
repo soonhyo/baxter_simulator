@@ -31,7 +31,9 @@
 					   left_joint_velocity_controller
 					   right_joint_velocity_controller
 					   left_joint_effort_controller
-					   right_joint_effort_controller"/>
+					   right_joint_effort_controller
+                       left_cartesian_impedance_trajectory_controller
+                       right_cartesian_impedance_trajectory_controller"/>
 
     <node if="$(arg left_electric_gripper)" name="left_gripper_controller_spawner_stopped" pkg="controller_manager" type="spawner" respawn="false"
         output="screen" ns="/robot" args="--shutdown-timeout -1 --stopped left_gripper_controller"/>

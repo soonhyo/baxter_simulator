@@ -49,6 +49,7 @@
 #include <baxter_core_msgs/AssemblyState.h>
 #include <baxter_core_msgs/HeadPanCommand.h>
 #include <baxter_core_msgs/EndEffectorCommand.h>
+#include <baxter_core_msgs/CartesianImpState.h>
 
 namespace baxter_gazebo_plugin {
 
@@ -61,6 +62,8 @@ class BaxterGazeboRosControlPlugin :
   ros::Subscriber head_state_sub;
   ros::Subscriber left_gripper_state_sub;
   ros::Subscriber right_gripper_state_sub;
+  ros::Subscriber left_cartesian_imp_state_sub_;
+  ros::Subscriber right_cartesian_imp_state_sub_;
 
   // Rate to publish assembly state
   ros::Timer timer_;
@@ -73,6 +76,10 @@ class BaxterGazeboRosControlPlugin :
 
   boost::mutex mtx_;  // mutex for re-entrent calls to modeCommandCallback
   bool enable_cmd, is_disabled, head_is_started, left_gripper_is_started, right_gripper_is_started;  // enabled tracks the current status of the robot that is being published & is_disabled keeps track of the action taken
+  bool right_imp_mode, left_imp_mode;
+
+  std::string LEFT = "left";
+  std::string RIGHT = "right";
 
  public:
 
@@ -106,6 +113,18 @@ class BaxterGazeboRosControlPlugin :
         model_nh_.subscribe < baxter_core_msgs::AssemblyState
             > ("/robot/state", 1, &BaxterGazeboRosControlPlugin::enableCommandCallback, this);
 
+    // Subscrib to the topic that publish the robot cartesian impedance mode
+    right_cartesian_imp_state_sub_ =
+      model_nh_.subscribe < baxter_core_msgs::CartesianImpState
+            > ("/robot/limb/right/cartesian_imp_mode", 1, &BaxterGazeboRosControlPlugin::rightCartesianIMPStateCallback, this);
+    left_cartesian_imp_state_sub_ =
+      model_nh_.subscribe < baxter_core_msgs::CartesianImpState
+            > ("/robot/limb/left/cartesian_imp_mode", 1, &BaxterGazeboRosControlPlugin::leftCartesianIMPStateCallback, this);
+
+
+    right_imp_mode = false;
+    left_imp_mode = false;
+
     enable_cmd = false;
     is_disabled = false;
     right_command_mode_.mode = -1;
@@ -125,9 +144,11 @@ class BaxterGazeboRosControlPlugin :
       stop_controllers.push_back("left_joint_effort_controller");
       stop_controllers.push_back("left_joint_velocity_controller");
       stop_controllers.push_back("left_joint_position_controller");
+      stop_controllers.push_back("left_cartesian_impedance_trajectory_controller");
       stop_controllers.push_back("right_joint_effort_controller");
       stop_controllers.push_back("right_joint_velocity_controller");
       stop_controllers.push_back("right_joint_position_controller");
+      stop_controllers.push_back("right_cartesian_impedance_trajectory_controller");
       stop_controllers.push_back("head_position_controller");
       stop_controllers.push_back("left_gripper_controller");
       stop_controllers.push_back("right_gripper_controller");
@@ -139,8 +160,10 @@ class BaxterGazeboRosControlPlugin :
                                "Failed to switch controllers");
       } else {
         //Resetting the command modes to the initial configuration
-	ROS_INFO("Robot is disabled");
-	ROS_INFO("Gravity compensation was turned off");
+        ROS_INFO("Robot is disabled");
+        ROS_INFO("Gravity compensation was turned off");
+        ROS_INFO("Now you can use baxter.launch");
+
         right_command_mode_.mode = -1;
         left_command_mode_.mode = -1;
         head_is_started=false;
@@ -148,6 +171,70 @@ class BaxterGazeboRosControlPlugin :
         right_gripper_is_started = false;
         is_disabled = true;
       }
+    }
+  }
+
+  void leftCartesianIMPStateCallback(const baxter_core_msgs::CartesianImpState msg) {
+    if (enable_cmd) {
+      cartesianIMPStateCallback(msg, LEFT);
+    } else {
+      ROS_WARN_STREAM_NAMED("baxter_gazebo_ros_control_plugin",
+                            "Enable the robot");
+      return;
+    }
+  }
+  void rightCartesianIMPStateCallback(const baxter_core_msgs::CartesianImpState msg) {
+    if (enable_cmd) {
+      cartesianIMPStateCallback(msg, RIGHT);
+    } else {
+      ROS_WARN_STREAM_NAMED("baxter_gazebo_ros_control_plugin",
+                            "Enable the robot");
+      return;
+    }
+  }
+
+  void cartesianIMPStateCallback(const baxter_core_msgs::CartesianImpState msg,
+                                 const std::string& side){
+    //lock out other thread(s) which are getting called back via ros.
+    boost::lock_guard < boost::mutex > guard(mtx_);
+
+    std::vector < std::string > start_controllers;
+    std::vector < std::string > stop_controllers;
+    std::string start,stop;
+
+    bool& imp_mode = (side == RIGHT) ? right_imp_mode : left_imp_mode;
+
+    if (!imp_mode && msg.isTurnedOn){
+      ROS_INFO("Cartesian impedance mode is turned on...");
+      start_controllers.push_back(side + "_cartesian_impedance_trajectory_controller");
+      stop_controllers.push_back(side + "_joint_position_controller");
+      stop_controllers.push_back(side + "_joint_velocity_controller");
+      stop_controllers.push_back(side + "_joint_effort_controller");
+      start=side+"_cartesian_impedance_trajectory_controller";
+      stop=side+"_joint_position_controller, "+side+"_joint_velocity_controller and "+side+"_joint_effort_controller";
+      imp_mode = true;
+    }else if (imp_mode && !msg.isTurnedOn){
+      ROS_INFO("Cartesian impedance mode is turned off...");
+      start_controllers.push_back(side + "_joint_position_controller");
+      stop_controllers.push_back(side + "_cartesian_impedance_trajectory_controller");
+      stop_controllers.push_back(side + "_joint_velocity_controller");
+      stop_controllers.push_back(side + "_joint_effort_controller");
+      start=side+"_joint_position_controller";
+      stop=side+"_cartesian_impedance_trajectory_controller, "+side+"_joint_velocity_controller and "+side+"_joint_effort_controller";
+      imp_mode = false;
+    }
+
+    if (!controller_manager_->switchController(
+        start_controllers, stop_controllers,
+        controller_manager_msgs::SwitchController::Request::BEST_EFFORT)) {
+      ROS_ERROR_STREAM_NAMED("baxter_gazebo_ros_control_plugin",
+                             "Failed to switch controllers");
+    }
+    else {
+       is_disabled=false;
+       ROS_INFO("Robot is enabled");
+       ROS_INFO_STREAM(start<<" was started and "<<stop<<" were stopped succesfully");
+       ROS_INFO("Gravity compensation was turned on");
     }
   }
 
@@ -273,22 +360,25 @@ class BaxterGazeboRosControlPlugin :
         start_controllers.push_back(side + "_joint_position_controller");
         stop_controllers.push_back(side + "_joint_velocity_controller");
         stop_controllers.push_back(side + "_joint_effort_controller");
+        stop_controllers.push_back(side + "_cartesian_impedance_trajectory_controller");
         start=side+"_joint_position_controller";
-	stop=side+"_joint_velocity_controller and "+side+"_joint_effort_controller";
+	stop=side+"_cartesian_impedance_trajectory_controller, "+side+"_joint_velocity_controller and "+side+"_joint_effort_controller";
         break;
       case baxter_core_msgs::JointCommand::VELOCITY_MODE:
         start_controllers.push_back(side + "_joint_velocity_controller");
         stop_controllers.push_back(side + "_joint_position_controller");
         stop_controllers.push_back(side + "_joint_effort_controller");
+        stop_controllers.push_back(side + "_cartesian_impedance_trajectory_controller");
         start=side+"_joint_velocity_controller";
-	stop=side+"_joint_position_controller and "+side+"_joint_effort_controller";
+	stop=side+"_cartesian_impedance_trajectory_controller, "+side+"_joint_position_controller and "+side+"_joint_effort_controller";
         break;
       case baxter_core_msgs::JointCommand::TORQUE_MODE:
         start_controllers.push_back(side + "_joint_effort_controller");
         stop_controllers.push_back(side + "_joint_position_controller");
         stop_controllers.push_back(side + "_joint_velocity_controller");
-        start=side+"_joint_position_controller";
-	stop=side+"_joint_velocity_controller and "+side+"_joint_velocity_controller";
+        stop_controllers.push_back(side + "_cartesian_impedance_trajectory_controller");
+        start=side+"_joint_effort_controller";
+	stop=side+"_cartesian_impedance_trajectory_controller, "+side+"_joint_position_controller and "+side+"_joint_velocity_controller";
         break;
       default:
         ROS_ERROR_STREAM_NAMED("baxter_gazebo_ros_control_plugin",
